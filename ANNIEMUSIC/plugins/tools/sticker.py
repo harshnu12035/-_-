@@ -2,9 +2,9 @@ import os
 import tempfile
 import inspect
 from uuid import uuid4
-
 from PIL import Image
-from pyrogram import raw, filters
+
+from pyrogram import filters, raw
 from pyrogram.errors import StickersetInvalid
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -12,6 +12,7 @@ from ANNIEMUSIC import app
 from config import BOT_USERNAME
 
 
+# helper: kwargs for CreateStickerSet
 def _cs_kwargs(is_anim: bool, is_vid: bool) -> dict:
     params = inspect.signature(raw.functions.stickers.CreateStickerSet).parameters
     kw = {}
@@ -22,72 +23,93 @@ def _cs_kwargs(is_anim: bool, is_vid: bool) -> dict:
     return kw
 
 
+# /st <sticker_id>
 @app.on_message(filters.command("st") & ~filters.reply)
 async def send_by_id(client, message):
     if len(message.command) != 2:
-        return await message.reply_text("usage: /st <sticker_id>")
+        return await message.reply_text("Usage: `/st <sticker_id>`")
     sid = message.command[1]
     try:
         await client.send_sticker(message.chat.id, sid)
     except Exception as e:
-        await message.reply_text(f"error: {e}")
+        await message.reply_text(f"Error: `{e}`")
 
 
+# /stid (reply to sticker)
 @app.on_message(filters.command(["stickerid", "stid"]) & filters.reply)
 async def show_ids(_, message):
     st = message.reply_to_message.sticker
     if not st:
-        return await message.reply_text("reply to a sticker")
+        return await message.reply_text("Reply to a sticker!")
     await message.reply_text(
-        f"sticker id: `{st.file_id}`\n"
-        f"unique id: `{st.file_unique_id}`"
+        f"**Sticker ID:** `{st.file_id}`\n"
+        f"**Unique ID:** `{st.file_unique_id}`"
     )
 
 
+# /stdl (reply to sticker)
 @app.on_message(filters.command("stdl") & filters.reply)
 async def download_sticker(client, message):
-    proc = await message.reply_text("➣ downloading…")
+    proc = await message.reply_text("➣ Downloading…")
     st = message.reply_to_message.sticker
+    if not st:
+        return await proc.edit("Reply to a sticker!")
+
     with tempfile.TemporaryDirectory() as td:
         path = await message.reply_to_message.download(os.path.join(td, "st"))
+
         if st.is_animated:
-            await proc.edit("➣ sending .tgs…")
-            await client.send_document(message.chat.id, path, caption="here's your animated sticker!")
+            await proc.edit("➣ Sending .tgs…")
+            await client.send_document(message.chat.id, path, caption="Here’s your animated sticker!")
         elif st.is_video:
-            await proc.edit("➣ sending video…")
-            await client.send_video(message.chat.id, path, supports_streaming=True, caption="here's your video sticker!")
+            await proc.edit("➣ Sending video…")
+            await client.send_video(message.chat.id, path, supports_streaming=True, caption="Here’s your video sticker!")
         else:
-            await proc.edit("➣ converting to png…")
+            await proc.edit("➣ Converting to PNG…")
             img = Image.open(path)
             out = f"{path}.png"
             img.save(out, "PNG")
-            await client.send_photo(message.chat.id, out, caption="here's your static image!")
+            await client.send_photo(message.chat.id, out, caption="Here’s your static image!")
+
     await proc.delete()
 
 
+# /packkang (reply to sticker from a pack)
 @app.on_message(filters.command("packkang") & filters.reply)
 async def pack_clone(client, message):
-    proc = await message.reply_text("➣ cloning pack…")
+    proc = await message.reply_text("➣ Cloning pack…")
     st = message.reply_to_message.sticker
+    if not st or not st.set_name:
+        return await proc.edit("This sticker doesn’t belong to a pack!")
+
     try:
+        # fetch original pack
         sset = await client.invoke(
             raw.functions.messages.GetStickerSet(
-                stickerset=raw.types.InputStickerSetShortName(short_name=st.set_name), hash=0
+                stickerset=raw.types.InputStickerSetShortName(short_name=st.set_name),
+                hash=0
             )
         )
+
+        # new pack title/short name
         title = message.command[1] if len(message.command) > 1 else f"{message.from_user.first_name}'s pack"
         short = f"pack_{uuid4().hex[:8]}_by_{BOT_USERNAME}"
+
         items = []
         for doc in sset.documents:
             emoji = next((a.alt for a in doc.attributes if isinstance(a, raw.types.DocumentAttributeSticker)), "🤔")
             items.append(
                 raw.types.InputStickerSetItem(
                     document=raw.types.InputDocument(
-                        id=doc.id, access_hash=doc.access_hash, file_reference=doc.file_reference
+                        id=doc.id,
+                        access_hash=doc.access_hash,
+                        file_reference=doc.file_reference
                     ),
                     emoji=emoji
                 )
             )
+
+        # create new pack
         await client.invoke(
             raw.functions.stickers.CreateStickerSet(
                 user_id=await client.resolve_peer(message.from_user.id),
@@ -97,11 +119,14 @@ async def pack_clone(client, message):
                 **_cs_kwargs(st.is_animated, st.is_video)
             )
         )
+
         await proc.edit(
-            f"cloned {len(items)} stickers!",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("view pack", url=f"https://t.me/addstickers/{short}")]]),
+            f"✅ Cloned {len(items)} stickers!",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("View Pack", url=f"https://t.me/addstickers/{short}")]]
+            ),
         )
     except StickersetInvalid:
-        await proc.edit("invalid sticker set")
+        await proc.edit("Invalid sticker set!")
     except Exception as e:
-        await proc.edit(f"error: {e}")
+        await proc.edit(f"Error: `{e}`")
