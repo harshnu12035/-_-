@@ -1,7 +1,6 @@
 import os
 from datetime import datetime, timedelta, timezone
 
-from PIL import Image, ImageDraw, ImageFont
 from pyrogram import enums, filters
 from pyrogram.types import (
     Message, ChatMemberUpdated,
@@ -13,9 +12,6 @@ from ANNIEMUSIC import app
 # ─────────────────────────────
 # CONFIG
 # ─────────────────────────────
-BG_PATH      = "ANNIEMUSIC/assets/annie/AnnieNwel.png"
-FALLBACK_PIC = "ANNIEMUSIC/assets/upic.png"
-FONT_PATH    = "ANNIEMUSIC/assets/annie/ArialReg.ttf"
 BTN_VIEW     = "๏ ᴠɪᴇᴡ ɴᴇᴡ ᴍᴇᴍʙᴇʀ ๏"
 BTN_ADD      = "๏ ᴋɪᴅɴᴀᴘ ᴍᴇ ๏"
 
@@ -73,29 +69,6 @@ db = _WelDB()
 last_messages: dict[int, list] = {}
 
 # ─────────────────────────────
-# IMAGE UTILS
-# ─────────────────────────────
-def _circle(im, size=(835, 839)):
-    im = im.resize(size, Image.LANCZOS).convert("RGBA")
-    mask = Image.new("L", size, 0)
-    ImageDraw.Draw(mask).ellipse((0, 0, *size), fill=255)
-    im.putalpha(mask)
-    return im
-
-def build_pic(av, fn, uid, un):
-    bg = Image.open(BG_PATH).convert("RGBA")
-    avatar = _circle(Image.open(av))
-    bg.paste(avatar, (1887, 390), avatar)
-    draw = ImageDraw.Draw(bg)
-    font = ImageFont.truetype(FONT_PATH, 65)
-    draw.text((421, 715), fn, fill=(242, 242, 242), font=font)
-    draw.text((270, 1005), str(uid), fill=(242, 242, 242), font=font)
-    draw.text((570, 1308), un, fill=(242, 242, 242), font=font)
-    path = f"downloads/welcome_{uid}.png"
-    bg.save(path)
-    return path
-
-# ─────────────────────────────
 # TOGGLE COMMAND
 # ─────────────────────────────
 @app.on_message(filters.command("welcome") & filters.group)
@@ -122,7 +95,7 @@ async def toggle(client, m: Message):
     await m.reply_text(f"**{'ᴇɴᴀʙʟᴇᴅ' if flag == 'on' else 'ᴅɪsᴀʙʟᴇᴅ'} ᴡᴇʟᴄᴏᴍᴇ ɴᴏᴛɪғɪᴄᴀᴛɪᴏɴ ɪɴ {m.chat.title}**")
 
 # ─────────────────────────────
-# WELCOME HANDLER
+# WELCOME HANDLER (ONLY TEXT)
 # ─────────────────────────────
 @app.on_chat_member_updated(filters.group, group=-3)
 async def welcome(client, update: ChatMemberUpdated):
@@ -149,24 +122,19 @@ async def welcome(client, update: ChatMemberUpdated):
         )
 
     user = new.user
-    avatar = img = None
     try:
-        avatar = await client.download_media(user.photo.big_file_id, file_name=f"downloads/pp_{user.id}.png") if user.photo else FALLBACK_PIC
-        img = build_pic(avatar, user.first_name, user.id, user.username or "No Username")
-
         members = await client.get_chat_members_count(cid)
         caption = CAPTION_TXT.format(
             chat_title=update.chat.title,
             mention=user.mention,
             uid=user.id,
-            uname=user.username or "No Username",
+            uname=user.username or "No_Username",
             count=members
         )
 
-        sent = await client.send_photo(
+        sent = await client.send_message(
             cid,
-            img,
-            caption=caption,
+            caption,
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton(BTN_VIEW, url=f"tg://openmessage?user_id={user.id}")],
                 [InlineKeyboardButton(BTN_ADD,  url=f"https://t.me/{client.username}?startgroup=true")],
@@ -181,8 +149,3 @@ async def welcome(client, update: ChatMemberUpdated):
 
     except Exception:
         await client.send_message(cid, f"🎉 Welcome, {user.mention}!")
-    finally:
-        for f in (avatar, img):
-            if f and os.path.exists(f) and "ANNIEMUSIC/assets" not in f:
-                try: os.remove(f)
-                except: pass
