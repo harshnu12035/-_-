@@ -53,7 +53,7 @@ def _pack_name(user_id: int, *, animated=False, video=False, index=0) -> str:
 
 def _pack_title(username: str, *, animated=False, video=False, index=0) -> str:
     """
-    Human‑readable pack title:
+    Human-readable pack title:
       <User>'s Sticker/Animated/Video Pack [<index>]
     """
     kind = "Animated" if animated else "Video" if video else "Sticker"
@@ -63,7 +63,7 @@ def _pack_title(username: str, *, animated=False, video=False, index=0) -> str:
 
 def _to_input_doc(doc: raw.base.Document) -> raw.types.InputDocument:
     """
-    Convert a raw Document into an InputDocument for sticker‑set calls.
+    Convert a raw Document into an InputDocument for sticker-set calls.
     """
     return raw.types.InputDocument(
         id=doc.id,
@@ -73,23 +73,38 @@ def _to_input_doc(doc: raw.base.Document) -> raw.types.InputDocument:
 
 
 async def _prepare_media(message, tmp_dir: str, notify) -> Tuple[str, str, bool, bool]:
+    """
+    Download / convert the replied media into a path ready for upload as a sticker.
+    Returns (kind, path, is_animated, is_video)
+    """
     r = message.reply_to_message
+    if not r:
+        raise ValueError("Reply to a message containing image/sticker/video/gif.")
 
+    # If replying a sticker -> download according to type
     if r.sticker:
         await notify.edit("➣ ᴘʀᴏᴄᴇssɪɴɢ sᴛɪᴄᴋᴇʀ…")
         s = r.sticker
         if s.is_animated:
-            return "sticker", await r.download(os.path.join(tmp_dir, "sticker.tgs")), True, False
+            out = os.path.join(tmp_dir, "sticker.tgs")
+            await r.download(out)
+            return "sticker", out, True, False
         if s.is_video:
-            return "sticker", await r.download(os.path.join(tmp_dir, "sticker.webm")), False, True
-        return "sticker", await r.download(os.path.join(tmp_dir, "sticker.png")), False, False
+            out = os.path.join(tmp_dir, "sticker.webm")
+            await r.download(out)
+            return "sticker", out, False, True
+        out = os.path.join(tmp_dir, "sticker.png")
+        await r.download(out)
+        return "sticker", out, False, False
 
+    # static image (photo or image document)
     if r.photo or (r.document and r.document.mime_type and r.document.mime_type.startswith("image/")):
         await notify.edit("➣ ᴄᴏɴᴠᴇʀᴛɪɴɢ ɪᴍᴀɢᴇ…")
         p = await r.download(os.path.join(tmp_dir, "image"))
-        p = await resize_file_to_sticker_size(p)
+        p = await resize_file_to_sticker_size(p)  # should return path
         return "image", p, False, False
 
+    # video / gif / animation
     if (
         r.video or r.animation or
         (r.document and (
@@ -100,6 +115,7 @@ async def _prepare_media(message, tmp_dir: str, notify) -> Tuple[str, str, bool,
         await notify.edit("➣ ᴘʀᴏᴄᴇssɪɴɢ ɢɪꜰ/ᴠɪᴅᴇᴏ…")
         raw_v = await r.download(os.path.join(tmp_dir, "raw.mp4"))
         out_v = os.path.join(tmp_dir, "sticker.webm")
+
         cmd = [
             "ffmpeg", "-y", "-i", raw_v,
             "-vf", "scale=512:512:flags=lanczos:force_original_aspect_ratio=decrease",
@@ -110,7 +126,7 @@ async def _prepare_media(message, tmp_dir: str, notify) -> Tuple[str, str, bool,
         ]
         res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if res.returncode != 0:
-            raise RuntimeError(res.stderr.decode())
+            raise RuntimeError("ffmpeg failed:\n" + res.stderr.decode(errors="ignore"))
         return "video", out_v, False, True
 
     raise ValueError("unsupported media type")
@@ -120,13 +136,15 @@ async def _prepare_media(message, tmp_dir: str, notify) -> Tuple[str, str, bool,
 async def kang(client, message):
     notify = await message.reply_text("➣ ᴘʀᴏᴄᴇssɪɴɢ…")
     tmp_dir = tempfile.mkdtemp()
+    out_uploaded_file = None
 
     try:
         kind, path, is_anim, is_vid = await _prepare_media(message, tmp_dir, notify)
         uid = message.from_user.id
-        uname = message.from_user.first_name
+        uname = message.from_user.first_name or str(uid)
         limit = 50 if is_anim or is_vid else 120
 
+        # find/create a pack short name that has space
         idx = 0
         while True:
             short = _pack_name(uid, animated=is_anim, video=is_vid, index=idx)
@@ -140,37 +158,67 @@ async def kang(client, message):
                 if len(sset.documents) >= limit:
                     idx += 1
                     continue
+                # found a pack with space
                 break
             except StickersetInvalid:
+                # pack does not exist -> we'll create it
                 break
 
         title = _pack_title(uname, animated=is_anim, video=is_vid, index=idx)
 
+        # Upload the prepared file to Telegram and get an InputFile for UploadMedia
+        # NOTE: use client.upload_file (Pyrogram) to get an input file object accepted by raw API
+        # upload_file returns a raw.types.InputFile (or a special UploadedFile), suitable to pass to InputMediaUploadedDocument.file
+        try:
+            uploaded = await client.upload_file(path)
+            out_uploaded_file = uploaded  # keep to cleanup if needed
+        except Exception as e:
+            raise RuntimeError(f"upload_file failed: {e}")
+
+        # Build InputMediaUploadedDocument
+        mime_type = (
+            "application/x-tgsticker" if is_anim else
+            "video/webm"         if is_vid  else
+            "image/png"
+        )
+        filename = os.path.basename(path)
+        attributes = [
+            raw.types.DocumentAttributeFilename(file_name=filename),
+            raw.types.DocumentAttributeSticker(alt="", stickerset=raw.types.InputStickerSetEmpty(), mask=False)
+        ]
+        if is_vid:
+            # DocumentAttributeVideo signature may vary between Pyrogram versions; try to provide common fields
+            try:
+                attributes.append(raw.types.DocumentAttributeVideo(duration=0, w=512, h=512, round_message=False, supports_streaming=False))
+            except TypeError:
+                # fallback: try without supports_streaming
+                try:
+                    attributes.append(raw.types.DocumentAttributeVideo(duration=0, w=512, h=512, round_message=False))
+                except Exception:
+                    pass
+
+        media = raw.types.InputMediaUploadedDocument(
+            file=uploaded,
+            mime_type=mime_type,
+            attributes=attributes
+        )
+
+        # Call UploadMedia to get a document object (the uploaded file as Document)
         upload = await client.invoke(
             raw.functions.messages.UploadMedia(
                 peer=await client.resolve_peer(uid),
-                media=raw.types.InputMediaUploadedDocument(
-                    file=await client.save_file(path),
-                    mime_type=(
-                        "application/x-tgsticker" if is_anim else
-                        "video/webm"         if is_vid  else
-                        "image/png"
-                    ),
-                    attributes=[
-                        raw.types.DocumentAttributeFilename(file_name=os.path.basename(path)),
-                        raw.types.DocumentAttributeSticker(alt="", stickerset=raw.types.InputStickerSetEmpty(), mask=False)
-                    ] + (
-                        [raw.types.DocumentAttributeVideo(duration=0, w=512, h=512, round_message=False, supports_streaming=False)]
-                        if is_vid else []
-                    )
-                )
+                media=media
             )
         )
         doc = upload.document
+        if not isinstance(doc, raw.base.Document):
+            raise RuntimeError("Upload didn't return a document object.")
 
         emoji = message.command[1] if len(message.command) > 1 else "🤔"
 
+        created = False
         try:
+            # Try add to existing set (if exists)
             await client.invoke(
                 raw.functions.stickers.AddStickerToSet(
                     stickerset=raw.types.InputStickerSetShortName(short_name=short),
@@ -179,6 +227,7 @@ async def kang(client, message):
             )
             created = False
         except StickersetInvalid:
+            # set doesn't exist -> create it
             await client.invoke(
                 raw.functions.stickers.CreateStickerSet(
                     user_id=await client.resolve_peer(uid),
@@ -190,6 +239,7 @@ async def kang(client, message):
             )
             created = True
         except StickersTooMuch:
+            # Too many stickers in this pack -> bump index and create new
             idx += 1
             short = _pack_name(uid, animated=is_anim, video=is_vid, index=idx)
             title = _pack_title(uname, animated=is_anim, video=is_vid, index=idx)
@@ -204,6 +254,7 @@ async def kang(client, message):
             )
             created = True
 
+        # fetch final set info
         sset = await client.invoke(
             raw.functions.messages.GetStickerSet(
                 stickerset=raw.types.InputStickerSetShortName(short_name=short),
@@ -227,7 +278,16 @@ async def kang(client, message):
         await notify.edit(f"flood wait – retry in {e.x}s")
     except (StickerEmojiInvalid, PeerIdInvalid, FileReferenceExpired, RPCError) as err:
         await notify.edit(f"error: {err}")
-    except Exception:
-        await notify.edit("unexpected error:\n" + traceback.format_exc())
+    except Exception as e:
+        # full traceback for debugging
+        tb = traceback.format_exc()
+        await notify.edit(f"unexpected error:\n{e}\n\n{tb[:1000]}")
     finally:
+        # cleanup uploaded temp and tmp_dir
+        try:
+            if out_uploaded_file:
+                # there's nothing special to delete for uploaded object; just ignore
+                out_uploaded_file = None
+        except Exception:
+            pass
         shutil.rmtree(tmp_dir, ignore_errors=True)
