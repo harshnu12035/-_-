@@ -1,79 +1,89 @@
 import os
 import cv2
 from PIL import Image
-from pyrogram import Client, filters
+from pyrogram import filters
 from ANNIEMUSIC import app
 
 
-@app.on_message(filters.command("tiny"))
+@app.on_message(filters.command("tiny") & filters.reply)
 async def tiny_sticker(client, message):
     reply = message.reply_to_message
-    if not (reply and reply.sticker):
-        await message.reply("Please reply to a sticker")
+    if not reply or not reply.sticker:
+        return await message.reply("Please reply to a sticker!")
+
+    status = await message.reply("Processing... 🐾")
+
+    try:
+        # Download sticker
+        file_path = await client.download_media(reply)
+
+        # Background image
+        bg = Image.open("ANNIEMUSIC/assets/rajnish.png")
+
+        # Handle .tgs (Lottie Stickers)
+        if file_path.endswith(".tgs"):
+            os.system(f"lottie_convert.py {file_path} json.json")
+            with open("json.json", "r") as f:
+                jsn = f.read().replace("512", "2000")
+            with open("json.json", "w") as f:
+                f.write(jsn)
+            os.system("lottie_convert.py json.json fixed.tgs")
+            out_file = "fixed.tgs"
+            os.remove("json.json")
+
+        # Handle GIF/MP4 animated stickers
+        elif file_path.endswith((".gif", ".mp4")):
+            cap = cv2.VideoCapture(file_path)
+            success, frame = cap.read()
+            cap.release()
+            if not success:
+                return await status.edit("Error reading video frame!")
+
+            cv2.imwrite("frame.png", frame)
+            im = Image.open("frame.png")
+
+            # Resize proportionally
+            im_resized = im.resize((200, 200))
+            im_resized.save("sticker.png")
+
+            # Paste onto background
+            bg_copy = bg.copy()
+            bg_copy.paste(im_resized, (150, 0))
+            bg_copy.save("output.webp", "WEBP", quality=95)
+            out_file = "output.webp"
+
+            os.remove("frame.png")
+            os.remove("sticker.png")
+
+        # Handle normal PNG/WEBP stickers
+        else:
+            im = Image.open(file_path)
+
+            im_resized = im.resize((200, 200))
+            im_resized.save("sticker.png")
+
+            bg_copy = bg.copy()
+            bg_copy.paste(im_resized, (150, 0))
+            bg_copy.save("output.webp", "WEBP", quality=95)
+            out_file = "output.webp"
+
+            os.remove("sticker.png")
+
+        # Send file
+        await client.send_document(
+            message.chat.id,
+            out_file,
+            reply_to_message_id=message.id
+        )
+
+    except Exception as e:
+        await status.edit(f"Error: {e}")
         return
-    kontol = await message.reply("Processing please wait")
-    await kontol.edit_text("🐾")
-    ik = await app.download_media(reply)
-    im1 = Image.open("ANNIEMUSIC/assets/rajnish.png")
-    if ik.endswith(".tgs"):
-        await app.download_media(reply, "wel2.tgs")
-        os.system("lottie_convert.py wel2.tgs json.json")
-        with open("json.json", "r") as json_file:
-            jsn = json_file.read()
-            jsn = jsn.replace("512", "2000")
-        with open("json.json", "w") as json_file:
-            json_file.write(jsn)
-        os.system("lottie_convert.py json.json wel2.tgs")
-        file = "wel2.tgs"
-        os.remove("json.json")
-    elif ik.endswith((".gif", ".mp4")):
-        iik = cv2.VideoCapture(ik)
-        _, busy = iik.read()
-        cv2.imwrite("i.png", busy)
-        fil = "i.png"
-        im = Image.open(fil)
-        z, d = im.size
-        if z == d:
-            xxx, yyy = 200, 200
-        else:
-            t = z + d
-            a = z / t
-            b = d / t
-            aa = (a * 100) - 50
-            bb = (b * 100) - 50
-            xxx = 200 + 5 * aa
-            yyy = 200 + 5 * bb
-        k = im.resize((int(xxx), int(yyy)))
-        k.save("k.png", format="PNG", optimize=True)
-        im2 = Image.open("k.png")
-        back_im = im1.copy()
-        back_im.paste(im2, (150, 0))
-        back_im.save("o.webp", "WEBP", quality=95)
-        file = "o.webp"
-        os.remove(fil)
-        os.remove("k.png")
-    else:
-        im = Image.open(ik)
-        z, d = im.size
-        if z == d:
-            xxx, yyy = 200, 200
-        else:
-            t = z + d
-            a = z / t
-            b = d / t
-            aa = (a * 100) - 50
-            bb = (b * 100) - 50
-            xxx = 200 + 5 * aa
-            yyy = 200 + 5 * bb
-        k = im.resize((int(xxx), int(yyy)))
-        k.save("k.png", format="PNG", optimize=True)
-        im2 = Image.open("k.png")
-        back_im = im1.copy()
-        back_im.paste(im2, (150, 0))
-        back_im.save("o.webp", "WEBP", quality=95)
-        file = "o.webp"
-        os.remove("k.png")
-    await app.send_document(message.chat.id, file, reply_to_message_id=message.id)
-    await kontol.delete()
-    os.remove(file)
-    os.remove(ik)
+
+    finally:
+        await status.delete()
+        # Clean up
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        if os.path.exists(out_file):
+            os.remove(out_file)
