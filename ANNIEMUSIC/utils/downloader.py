@@ -11,7 +11,7 @@ from yt_dlp import YoutubeDL
 
 from ANNIEMUSIC.core.dir import DOWNLOAD_DIR as _DOWNLOAD_DIR, CACHE_DIR
 from ANNIEMUSIC.utils.cookie_handler import COOKIE_PATH
-from ANNIEMUSIC.utils.tuning import CHUNK_SIZE, SEM
+from config import CHUNK_SIZE, SEM
 from config import API_KEY, API_URL
 
 USE_API: bool = bool(API_URL and API_KEY)
