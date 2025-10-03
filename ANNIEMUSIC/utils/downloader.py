@@ -7,13 +7,22 @@ from typing import Optional, Union, Dict
 from yt_dlp import YoutubeDL
 from config import API_URL, API_KEY
 
+# -------------------------
+#  FIXED: DOWNLOAD & CACHE DIR
+# -------------------------
+BASE_DIR = os.getcwd()
+DOWNLOAD_DIR = os.path.join(BASE_DIR, "downloads")
+CACHE_DIR = os.path.join(BASE_DIR, "cache")
+
+os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+os.makedirs(CACHE_DIR, exist_ok=True)
+# -------------------------
+
 USE_API = bool(API_URL and API_KEY)
 _logged_api_skip = False
 CHUNK_SIZE = 8192
 RETRY_DELAY = 2
 cookies_file = "ANNIEMUSIC/assets/cookies.txt"
-download_folder = "downloads"
-os.makedirs(download_folder, exist_ok=True)
 
 
 def extract_video_id(link: str) -> str:
@@ -28,7 +37,7 @@ def safe_filename(name: str) -> str:
 
 def file_exists(video_id: str) -> Optional[str]:
     for ext in ["mp3", "m4a", "webm"]:
-        path = f"{download_folder}/{video_id}.{ext}"
+        path = f"{DOWNLOAD_DIR}/{video_id}.{ext}"
         if os.path.exists(path):
             print(f"[CACHED] Using existing file: {path}")
             return path
@@ -72,7 +81,7 @@ async def api_download_song(link: str) -> Optional[str]:
                         return None
 
             fmt = data.get("format", "mp3").lower()
-            path = f"{download_folder}/{video_id}.{fmt}"
+            path = f"{DOWNLOAD_DIR}/{video_id}.{fmt}"
 
             async with session.get(download_url) as file_response:
                 async with aiofiles.open(path, "wb") as f:
@@ -94,7 +103,7 @@ def _download_ytdlp(link: str, opts: Dict) -> Optional[str]:
             info = ydl.extract_info(link, download=False)
             ext = info.get("ext", "webm")
             vid = info.get("id")
-            path = f"{download_folder}/{vid}.{ext}"
+            path = f"{DOWNLOAD_DIR}/{vid}.{ext}"
             if os.path.exists(path):
                 return path
             ydl.download([link])
@@ -110,7 +119,7 @@ async def yt_dlp_download(link: str, type: str, format_id: str = None, title: st
     if type == "audio":
         opts = {
             "format": "bestaudio/best",
-            "outtmpl": f"{download_folder}/%(id)s.%(ext)s",
+            "outtmpl": f"{DOWNLOAD_DIR}/%(id)s.%(ext)s",
             "quiet": True,
             "no_warnings": True,
             "cookiefile": cookies_file,
@@ -122,7 +131,7 @@ async def yt_dlp_download(link: str, type: str, format_id: str = None, title: st
     elif type == "video":
         opts = {
             "format": "best[height<=?720][width<=?1280]",
-            "outtmpl": f"{download_folder}/%(id)s.%(ext)s",
+            "outtmpl": f"{DOWNLOAD_DIR}/%(id)s.%(ext)s",
             "quiet": True,
             "no_warnings": True,
             "cookiefile": cookies_file,
@@ -135,7 +144,7 @@ async def yt_dlp_download(link: str, type: str, format_id: str = None, title: st
         safe_title = safe_filename(title)
         opts = {
             "format": f"{format_id}+140",
-            "outtmpl": f"{download_folder}/{safe_title}.mp4",
+            "outtmpl": f"{DOWNLOAD_DIR}/{safe_title}.mp4",
             "quiet": True,
             "no_warnings": True,
             "prefer_ffmpeg": True,
@@ -143,13 +152,13 @@ async def yt_dlp_download(link: str, type: str, format_id: str = None, title: st
             "cookiefile": cookies_file,
         }
         await loop.run_in_executor(None, lambda: YoutubeDL(opts).download([link]))
-        return f"{download_folder}/{safe_title}.mp4"
+        return f"{DOWNLOAD_DIR}/{safe_title}.mp4"
 
     elif type == "song_audio" and format_id and title:
         safe_title = safe_filename(title)
         opts = {
             "format": format_id,
-            "outtmpl": f"{download_folder}/{safe_title}.%(ext)s",
+            "outtmpl": f"{DOWNLOAD_DIR}/{safe_title}.%(ext)s",
             "quiet": True,
             "no_warnings": True,
             "prefer_ffmpeg": True,
@@ -161,7 +170,7 @@ async def yt_dlp_download(link: str, type: str, format_id: str = None, title: st
             }],
         }
         await loop.run_in_executor(None, lambda: YoutubeDL(opts).download([link]))
-        return f"{download_folder}/{safe_title}.mp3"
+        return f"{DOWNLOAD_DIR}/{safe_title}.mp3"
 
     return None
 
