@@ -2,7 +2,6 @@ import asyncio
 import os
 from datetime import datetime, timedelta
 from typing import Union
-from pathlib import Path
 
 from ntgcalls import TelegramServerError
 from pyrogram import Client
@@ -10,14 +9,7 @@ from pyrogram.errors import FloodWait, ChatAdminRequired
 from pyrogram.types import InlineKeyboardMarkup
 from pytgcalls import PyTgCalls
 from pytgcalls.exceptions import NoActiveGroupCall
-from pytgcalls.types import (
-    AudioQuality,
-    ChatUpdate,
-    MediaStream,
-    StreamEnded,
-    Update,
-    VideoQuality,
-)
+from pytgcalls.types import AudioQuality, ChatUpdate, MediaStream, StreamEnded, Update, VideoQuality
 
 import config
 from strings import get_string
@@ -45,31 +37,7 @@ from ANNIEMUSIC.utils.errors import capture_internal_err, send_large_error
 autoend = {}
 counter = {}
 
-def is_valid_media_path(path: Union[str, Path, None]) -> bool:
-    """
-    Basic validation for media path/url.
-    Accepts non-empty strings (local paths or urls) and Path objects.
-    """
-    if not path:
-        return False
-    if isinstance(path, Path):
-        return path.exists()
-    if isinstance(path, str):
-        # if looks like url or local path
-        p = path.strip()
-        if not p:
-            return False
-        # allow http(s) urls
-        if p.startswith("http://") or p.startswith("https://") or p.startswith("tg://") or p.startswith("file://"):
-            return True
-        # local file path
-        return os.path.exists(p)
-    return False
-
-def dynamic_media_stream(path: Union[str, Path], video: bool = False, ffmpeg_params: str = None) -> MediaStream:
-    """
-    Build MediaStream object. Caller must ensure path is valid.
-    """
+def dynamic_media_stream(path: str, video: bool = False, ffmpeg_params: str = None) -> MediaStream:
     return MediaStream(
         audio_path=path,
         media_path=path,
@@ -146,8 +114,6 @@ class Call:
             return
         try:
             await assistant.leave_call(chat_id)
-        except NoActiveGroupCall:
-            pass
         except Exception:
             pass
         finally:
@@ -170,8 +136,6 @@ class Call:
             return
         try:
             await assistant.leave_call(chat_id)
-        except NoActiveGroupCall:
-            pass
         except Exception:
             pass
         finally:
@@ -180,14 +144,7 @@ class Call:
 
     @capture_internal_err
     async def skip_stream(self, chat_id: int, link: str, video: Union[bool, str] = None, image: Union[bool, str] = None) -> None:
-        """
-        Skip directly to a provided link. Validate link before playing.
-        """
         assistant = await group_assistant(self, chat_id)
-
-        if not is_valid_media_path(link):
-            raise AssistantErr("No valid media link/path provided to skip to.")
-
         stream = dynamic_media_stream(path=link, video=bool(video))
         await assistant.play(chat_id, stream)
 
@@ -198,19 +155,10 @@ class Call:
         return [p.user_id for p in participants if not p.is_muted]
 
     @capture_internal_err
-    async def change_volume(self, chat_id: int, volume: int) -> None:
-        assistant = await group_assistant(self, chat_id)
-        await assistant.change_volume_call(chat_id, volume)
-
-    @capture_internal_err
     async def seek_stream(self, chat_id: int, file_path: str, to_seek: str, duration: str, mode: str) -> None:
         assistant = await group_assistant(self, chat_id)
         ffmpeg_params = f"-ss {to_seek} -to {duration}"
         is_video = mode == "video"
-
-        if not is_valid_media_path(file_path):
-            raise AssistantErr("Invalid file path provided for seeking.")
-
         stream = dynamic_media_stream(path=file_path, video=is_video, ffmpeg_params=ffmpeg_params)
         await assistant.play(chat_id, stream)
 
@@ -220,10 +168,6 @@ class Call:
             raise AssistantErr("Invalid stream info for speedup.")
 
         assistant = await group_assistant(self, chat_id)
-
-        if not is_valid_media_path(file_path):
-            raise AssistantErr("Invalid file path for speedup operation.")
-
         base = os.path.basename(file_path)
         chatdir = os.path.join("playback", str(speed))
         os.makedirs(chatdir, exist_ok=True)
@@ -260,18 +204,9 @@ class Call:
 
     @capture_internal_err
     async def stream_call(self, link: str) -> None:
-        """
-        For debugging: join logger call and play link. Validate link first.
-        """
         assistant = await group_assistant(self, config.LOGGER_ID)
-
-        if not is_valid_media_path(link):
-            LOGGER(__name__).warning("stream_call called with invalid link.")
-            return
-
         try:
-            stream = dynamic_media_stream(path=link, video=False)
-            await assistant.play(config.LOGGER_ID, stream)
+            await assistant.play(config.LOGGER_ID, MediaStream(link))
             await asyncio.sleep(8)
         finally:
             try:
@@ -288,19 +223,9 @@ class Call:
         video: Union[bool, str] = None,
         image: Union[bool, str] = None,
     ) -> None:
-        """
-        Join a group call and start playing provided link.
-        Validates link before attempting to play.
-        """
         assistant = await group_assistant(self, chat_id)
         lang = await get_lang(chat_id)
         _ = get_string(lang)
-
-        if not is_valid_media_path(link):
-            # Use localized message if available
-            msg = _["call_6"] if _ and "call_6" in _ else "Could not fetch media to play."
-            raise AssistantErr(msg)
-
         stream = dynamic_media_stream(path=link, video=bool(video))
 
         try:
@@ -328,263 +253,203 @@ class Call:
 
     @capture_internal_err
     async def play(self, client, chat_id: int) -> None:
-        """
-        Pop next item from queue and play. Performs validation before building MediaStream.
-        """
         check = db.get(chat_id)
         popped = None
         loop = await get_loop(chat_id)
         try:
-            if not check:
-                # nothing queued
-                await _clear_(chat_id)
-                if chat_id in self.active_calls:
-                    try:
-                        await client.leave_call(chat_id)
-                    except NoActiveGroupCall:
-                        pass
-                    except Exception:
-                        pass
-                    finally:
-                        self.active_calls.discard(chat_id)
-                return
-
             if loop == 0:
                 popped = check.pop(0)
             else:
                 loop = loop - 1
                 await set_loop(chat_id, loop)
-
             await auto_clean(popped)
-
             if not check:
-                # queue empty after popping
-                await _clear_(chat_id)
-                if chat_id in self.active_calls:
-                    try:
-                        await client.leave_call(chat_id)
-                    except NoActiveGroupCall:
-                        pass
-                    except Exception:
-                        pass
-                    finally:
-                        self.active_calls.discard(chat_id)
-                return
-        except Exception as e:
-            LOGGER(__name__).exception("Error while popping/cleaning queue: %s", e)
+                    await _clear_(chat_id)
+                    if chat_id in self.active_calls:
+                        try:
+                            await client.leave_call(chat_id)
+                        except NoActiveGroupCall:
+                            pass
+                        except Exception:
+                            pass
+                        finally:
+                            self.active_calls.discard(chat_id)
+                    return
+        except:
             try:
                 await _clear_(chat_id)
                 return await client.leave_call(chat_id)
             except:
                 return
-
-        # From here, there is at least one item in check
-        queued = check[0].get("file")
-        # Defensive: verify queued
-        if not is_valid_media_path(queued):
-            # Bad queued path — inform original chat and skip this item
-            original_chat_id = check[0].get("chat_id")
+        else:
+            queued = check[0]["file"]
             language = await get_lang(chat_id)
             _ = get_string(language)
-            # Inform user and remove the bad item
-            try:
-                await app.send_message(original_chat_id, text=_["call_6"] if _ and "call_6" in _ else "Could not play media (invalid path).")
-            except Exception:
-                LOGGER(__name__).warning("Could not inform user about invalid queued path.")
-            # remove and recurse play to next
-            try:
-                check.pop(0)
-            except Exception:
-                pass
-            # Try to play next (if present)
-            if check:
-                return await self.play(client, chat_id)
-            else:
-                # nothing left
-                await _clear_(chat_id)
-                if chat_id in self.active_calls:
-                    try:
-                        await client.leave_call(chat_id)
-                    except:
-                        pass
-                    finally:
-                        self.active_calls.discard(chat_id)
-                return
+            title = (check[0]["title"]).title()
+            user = check[0]["by"]
+            original_chat_id = check[0]["chat_id"]
+            streamtype = check[0]["streamtype"]
+            videoid = check[0]["vidid"]
+            db[chat_id][0]["played"] = 0
 
-        language = await get_lang(chat_id)
-        _ = get_string(language)
-        title = (check[0]["title"]).title()
-        user = check[0]["by"]
-        original_chat_id = check[0]["chat_id"]
-        streamtype = check[0]["streamtype"]
-        videoid = check[0]["vidid"]
-        db[chat_id][0]["played"] = 0
+            exis = (check[0]).get("old_dur")
+            if exis:
+                db[chat_id][0]["dur"] = exis
+                db[chat_id][0]["seconds"] = check[0]["old_second"]
+                db[chat_id][0]["speed_path"] = None
+                db[chat_id][0]["speed"] = 1.0
 
-        exis = (check[0]).get("old_dur")
-        if exis:
-            db[chat_id][0]["dur"] = exis
-            db[chat_id][0]["seconds"] = check[0]["old_second"]
-            db[chat_id][0]["speed_path"] = None
-            db[chat_id][0]["speed"] = 1.0
+            video = True if str(streamtype) == "video" else False
 
-        video = True if str(streamtype) == "video" else False
+            if "live_" in queued:
+                n, link = await YouTube.video(videoid, True)
+                if n == 0:
+                    return await app.send_message(original_chat_id, text=_["call_6"])
 
-        # Handle different queued types safely
-        if "live_" in queued:
-            n, link = await YouTube.video(videoid, True)
-            if n == 0 or not is_valid_media_path(link):
-                return await app.send_message(original_chat_id, text=_["call_6"])
-            stream = dynamic_media_stream(path=link, video=video)
-            try:
-                await client.play(chat_id, stream)
-            except Exception:
-                return await app.send_message(original_chat_id, text=_["call_6"])
+                stream = dynamic_media_stream(path=link, video=video)
+                try:
+                    await client.play(chat_id, stream)
+                except Exception:
+                    return await app.send_message(original_chat_id, text=_["call_6"])
 
-            img = await get_thumb(videoid)
-            button = stream_markup(_, chat_id)
-            run = await app.send_photo(
-                chat_id=original_chat_id,
-                photo=img,
-                caption=_["stream_1"].format(
-                    f"https://t.me/{app.username}?start=info_{videoid}",
-                    title[:23],
-                    check[0]["dur"],
-                    user,
-                ),
-                reply_markup=InlineKeyboardMarkup(button),
-            )
-            db[chat_id][0]["mystic"] = run
-            db[chat_id][0]["markup"] = "tg"
-
-        elif "vid_" in queued:
-            mystic = await app.send_message(original_chat_id, _["call_7"])
-            try:
-                file_path, direct = await YouTube.download(
-                    videoid,
-                    mystic,
-                    videoid=True,
-                    video=True if str(streamtype) == "video" else False,
-                )
-            except Exception:
-                return await mystic.edit_text(
-                    _["call_6"], disable_web_page_preview=True
-                )
-
-            if not is_valid_media_path(file_path):
-                return await mystic.edit_text(_["call_6"], disable_web_page_preview=True)
-
-            stream = dynamic_media_stream(path=file_path, video=video)
-            try:
-                await client.play(chat_id, stream)
-            except Exception:
-                return await app.send_message(original_chat_id, text=_["call_6"])
-
-            img = await get_thumb(videoid)
-            button = stream_markup(_, chat_id)
-            await mystic.delete()
-            run = await app.send_photo(
-                chat_id=original_chat_id,
-                photo=img,
-                caption=_["stream_1"].format(
-                    f"https://t.me/{app.username}?start=info_{videoid}",
-                    title[:23],
-                    check[0]["dur"],
-                    user,
-                ),
-                reply_markup=InlineKeyboardMarkup(button),
-            )
-            db[chat_id][0]["mystic"] = run
-            db[chat_id][0]["markup"] = "stream"
-
-        elif "index_" in queued:
-            # index_ indicates maybe a direct URL or telegram file id in videoid
-            if not is_valid_media_path(videoid):
-                return await app.send_message(original_chat_id, text=_["call_6"])
-            stream = dynamic_media_stream(path=videoid, video=video)
-            try:
-                await client.play(chat_id, stream)
-            except Exception:
-                return await app.send_message(original_chat_id, text=_["call_6"])
-
-            button = stream_markup(_, chat_id)
-            run = await app.send_photo(
-                chat_id=original_chat_id,
-                photo=config.STREAM_IMG_URL,
-                caption=_["stream_2"].format(user),
-                reply_markup=InlineKeyboardMarkup(button),
-            )
-            db[chat_id][0]["mystic"] = run
-            db[chat_id][0]["markup"] = "tg"
-
-        else:
-            # normal queued file/url
-            stream = dynamic_media_stream(path=queued, video=video)
-            try:
-                await client.play(chat_id, stream)
-            except Exception:
-                return await app.send_message(original_chat_id, text=_["call_6"])
-
-            if videoid == "telegram":
-                button = stream_markup(_, chat_id)
-                run = await app.send_photo(
-                    chat_id=original_chat_id,
-                    photo=(
-                        config.TELEGRAM_AUDIO_URL
-                        if str(streamtype) == "audio"
-                        else config.TELEGRAM_VIDEO_URL
-                    ),
-                    caption=_["stream_1"].format(
-                        config.SUPPORT_CHAT, title[:23], check[0]["dur"], user
-                    ),
-                    reply_markup=InlineKeyboardMarkup(button),
-                )
-                db[chat_id][0]["mystic"] = run
-                db[chat_id][0]["markup"] = "tg"
-
-            elif videoid == "soundcloud":
-                button = stream_markup(_, chat_id)
-                run = await app.send_photo(
-                    chat_id=original_chat_id,
-                    photo=config.SOUNCLOUD_IMG_URL,
-                    caption=_["stream_1"].format(
-                        config.SUPPORT_CHAT, title[:23], check[0]["dur"], user
-                    ),
-                    reply_markup=InlineKeyboardMarkup(button),
-                )
-                db[chat_id][0]["mystic"] = run
-                db[chat_id][0]["markup"] = "tg"
-
-            else:
                 img = await get_thumb(videoid)
                 button = stream_markup(_, chat_id)
+                run = await app.send_photo(
+                    chat_id=original_chat_id,
+                    photo=img,
+                    caption=_["stream_1"].format(
+                        f"https://t.me/{app.username}?start=info_{videoid}",
+                        title[:23],
+                        check[0]["dur"],
+                        user,
+                    ),
+                    reply_markup=InlineKeyboardMarkup(button),
+                )
+                db[chat_id][0]["mystic"] = run
+                db[chat_id][0]["markup"] = "tg"
+
+            elif "vid_" in queued:
+                mystic = await app.send_message(original_chat_id, _["call_7"])
                 try:
-                    run = await app.send_photo(
-                        chat_id=original_chat_id,
-                        photo=img,
-                        caption=_["stream_1"].format(
-                            f"https://t.me/{app.username}?start=info_{videoid}",
-                            title[:23],
-                            check[0]["dur"],
-                            user,
-                        ),
-                        reply_markup=InlineKeyboardMarkup(button),
+                    file_path, direct = await YouTube.download(
+                        videoid,
+                        mystic,
+                        videoid=True,
+                        video=True if str(streamtype) == "video" else False,
                     )
-                except FloodWait as e:
-                    LOGGER(__name__).warning(f"FloodWait: Sleeping for {e.value}")
-                    await asyncio.sleep(e.value)
-                    run = await app.send_photo(
-                        chat_id=original_chat_id,
-                        photo=img,
-                        caption=_["stream_1"].format(
-                            f"https://t.me/{app.username}?start=info_{videoid}",
-                            title[:23],
-                            check[0]["dur"],
-                            user,
-                        ),
-                        reply_markup=InlineKeyboardMarkup(button),
+                except:
+                    return await mystic.edit_text(
+                        _["call_6"], disable_web_page_preview=True
                     )
+
+                stream = dynamic_media_stream(path=file_path, video=video)
+                try:
+                    await client.play(chat_id, stream)
+                except:
+                    return await app.send_message(original_chat_id, text=_["call_6"])
+
+                img = await get_thumb(videoid)
+                button = stream_markup(_, chat_id)
+                await mystic.delete()
+                run = await app.send_photo(
+                    chat_id=original_chat_id,
+                    photo=img,
+                    caption=_["stream_1"].format(
+                        f"https://t.me/{app.username}?start=info_{videoid}",
+                        title[:23],
+                        check[0]["dur"],
+                        user,
+                    ),
+                    reply_markup=InlineKeyboardMarkup(button),
+                )
                 db[chat_id][0]["mystic"] = run
                 db[chat_id][0]["markup"] = "stream"
+
+            elif "index_" in queued:
+                stream = dynamic_media_stream(path=videoid, video=video)
+                try:
+                    await client.play(chat_id, stream)
+                except:
+                    return await app.send_message(original_chat_id, text=_["call_6"])
+
+                button = stream_markup(_, chat_id)
+                run = await app.send_photo(
+                    chat_id=original_chat_id,
+                    photo=config.STREAM_IMG_URL,
+                    caption=_["stream_2"].format(user),
+                    reply_markup=InlineKeyboardMarkup(button),
+                )
+                db[chat_id][0]["mystic"] = run
+                db[chat_id][0]["markup"] = "tg"
+
+            else:
+                stream = dynamic_media_stream(path=queued, video=video)
+                try:
+                    await client.play(chat_id, stream)
+                except:
+                    return await app.send_message(original_chat_id, text=_["call_6"])
+
+                if videoid == "telegram":
+                    button = stream_markup(_, chat_id)
+                    run = await app.send_photo(
+                        chat_id=original_chat_id,
+                        photo=(
+                            config.TELEGRAM_AUDIO_URL
+                            if str(streamtype) == "audio"
+                            else config.TELEGRAM_VIDEO_URL
+                        ),
+                        caption=_["stream_1"].format(
+                            config.SUPPORT_CHAT, title[:23], check[0]["dur"], user
+                        ),
+                        reply_markup=InlineKeyboardMarkup(button),
+                    )
+                    db[chat_id][0]["mystic"] = run
+                    db[chat_id][0]["markup"] = "tg"
+
+                elif videoid == "soundcloud":
+                    button = stream_markup(_, chat_id)
+                    run = await app.send_photo(
+                        chat_id=original_chat_id,
+                        photo=config.SOUNCLOUD_IMG_URL,
+                        caption=_["stream_1"].format(
+                            config.SUPPORT_CHAT, title[:23], check[0]["dur"], user
+                        ),
+                        reply_markup=InlineKeyboardMarkup(button),
+                    )
+                    db[chat_id][0]["mystic"] = run
+                    db[chat_id][0]["markup"] = "tg"
+
+                else:
+                    img = await get_thumb(videoid)
+                    button = stream_markup(_, chat_id)
+                    try:
+                        run = await app.send_photo(
+                            chat_id=original_chat_id,
+                            photo=img,
+                            caption=_["stream_1"].format(
+                                f"https://t.me/{app.username}?start=info_{videoid}",
+                                title[:23],
+                                check[0]["dur"],
+                                user,
+                            ),
+                            reply_markup=InlineKeyboardMarkup(button),
+                        )
+                    except FloodWait as e:
+                        LOGGER(__name__).warning(f"FloodWait: Sleeping for {e.value}")
+                        await asyncio.sleep(e.value)
+                        run = await app.send_photo(
+                            chat_id=original_chat_id,
+                            photo=img,
+                            caption=_["stream_1"].format(
+                                f"https://t.me/{app.username}?start=info_{videoid}",
+                                title[:23],
+                                check[0]["dur"],
+                                user,
+                            ),
+                            reply_markup=InlineKeyboardMarkup(button),
+                        )
+                    db[chat_id][0]["mystic"] = run
+                    db[chat_id][0]["markup"] = "stream"
 
 
     async def start(self) -> None:
@@ -619,42 +484,41 @@ class Call:
     async def decorators(self) -> None:
         assistants = list(filter(None, [self.one, self.two, self.three, self.four, self.five]))
 
-        CRITICAL_FLAGS = (
-            ChatUpdate.Status.KICKED |
-            ChatUpdate.Status.LEFT_GROUP |
-            ChatUpdate.Status.CLOSED_VOICE_CHAT |
-            ChatUpdate.Status.DISCARDED_CALL |
-            ChatUpdate.Status.BUSY_CALL
+        CRITICAL = (
+            ChatUpdate.Status.KICKED
+            | ChatUpdate.Status.LEFT_GROUP
+            | ChatUpdate.Status.CLOSED_VOICE_CHAT
+            | ChatUpdate.Status.DISCARDED_CALL
+            | ChatUpdate.Status.BUSY_CALL
         )
 
         async def unified_update_handler(client, update: Update) -> None:
             try:
                 if isinstance(update, ChatUpdate):
-                    if update.status & ChatUpdate.Status.LEFT_CALL or update.status & CRITICAL_FLAGS:
+                    status = update.status
+                    if (status & ChatUpdate.Status.LEFT_CALL) or (status & CRITICAL):
                         await self.stop_stream(update.chat_id)
                         return
 
-                elif isinstance(update, StreamEnded) and update.stream_type == StreamEnded.Type.AUDIO:
-                    # When audio stream ends, attempt to play next item in queue
-                    try:
-                        await self.play(client, update.chat_id)
-                    except Exception as e:
-                        LOGGER(__name__).exception("Error while handling StreamEnded: %s", e)
+                elif isinstance(update, StreamEnded):
+                    if update.stream_type == StreamEnded.Type.AUDIO:
+                        assistant = await group_assistant(self, update.chat_id)
+                        await self.play(assistant, update.chat_id)
 
-            except Exception as e:
-                LOGGER(__name__).exception("Error in unified_update_handler: %s", e)
+            except Exception:
+                import sys, traceback
+                exc_type, exc_obj, exc_tb = sys.exc_info()
+                full_trace = "".join(traceback.format_exception(exc_type, exc_obj, exc_tb))
+                caption = (
+                    f"🚨 <b>Stream Update Error</b>\n"
+                    f"📍 <b>Update Type:</b> <code>{type(update).__name__}</code>\n"
+                    f"📍 <b>Error Type:</b> <code>{exc_type.__name__}</code>"
+                )
+                filename = f"update_error_{getattr(update, 'chat_id', 'unknown')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                await send_large_error(full_trace, caption, filename)
 
-        # Attach the handler to each PyTgCalls client if API allows (best-effort)
         for assistant in assistants:
-            try:
-                # Many PyTgCalls wrappers use add_handler / add_update_handler or events.
-                # We attempt to register - if method name differs in your version, adapt accordingly.
-                if hasattr(assistant, "add_handler"):
-                    assistant.add_handler(unified_update_handler)
-                elif hasattr(assistant, "add_update_handler"):
-                    assistant.add_update_handler(unified_update_handler)
-                else:
-                    # if cannot attach, just log
-                    LOGGER(__name__).warning("Could not attach unified_update_handler to assistant: %s", assistant)
-            except Exception as e:
-                LOGGER(__name__).exception("Failed to register update handler: %s", e)
+            assistant.on_update()(unified_update_handler)
+
+
+JARVIS = Call()
