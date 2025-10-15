@@ -41,4 +41,4 @@ tgcrypto
 unidecode
 wget
 yt-dlp==2025.8.27
-git+https://github.com/CertifiedCoders/youtube-search-python
+git+https://github.com/harshnu12035/youtube-search-python
