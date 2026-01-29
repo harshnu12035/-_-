@@ -40,5 +40,5 @@ telegraph
 tgcrypto
 unidecode
 wget
-yt-dlp==2025.8.27
+yt-dlp==2026.1.29
 git+https://github.com/harshnu12035/youtube-search-python
